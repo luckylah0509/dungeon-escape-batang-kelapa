@@ -1,410 +1,432 @@
-"""
-Dungeon: peta tile, tabrakan, ruangan terhubung lewat pintu, status ruangan, ruangan bos.
-Jalankan:  pip install pygame  ->  python dungeon.py
-Kontrol: WASD / panah = jalan, SPASI = serang, R = ulang kalau mati.
-
-Legenda peta:
-  #  dinding (solid)      .  lantai          D  pintu
-  M  monster biasa        B  bos             T  jebakan
-"""
-import math
+import os
 import sys
-
 import pygame
+from pygame.locals import *
 
-TILE = 32
-SOLID = {"#"}
+pygame.init()
 
+FULLSCREEN_MODE = False
 
-# ----------------------------------------------------------------------
-# 1. PETA TILE + TABRAKAN
-# ----------------------------------------------------------------------
-class Tilemap:
-    def __init__(self, rows):
-        assert len({len(r) for r in rows}) == 1, "Semua baris peta harus sama panjang"
-        self.rows = [list(r) for r in rows]
-        self.h = len(rows)
-        self.w = len(rows[0])
+if FULLSCREEN_MODE:
+    screen = pygame.display.set_mode((0, 0), FULLSCREEN)
+else:
+    screen = pygame.display.set_mode((1280, 720))
+S_WIDTH, S_HEIGHT = screen.get_size()
 
-    def tile_at(self, tx, ty):
-        if 0 <= tx < self.w and 0 <= ty < self.h:
-            return self.rows[ty][tx]
-        return "#"  # di luar peta dianggap dinding
+pygame.display.set_caption("Batang kelapa88")
 
-    def is_solid(self, tx, ty):
-        return self.tile_at(tx, ty) in SOLID
+clock = pygame.time.Clock()
+FPS = 60
 
-    def find(self, ch):
-        """Daftar posisi tile (tx, ty) yang berisi simbol ch."""
-        return [(x, y) for y, row in enumerate(self.rows)
-                for x, c in enumerate(row) if c == ch]
-
-    def erase_marks(self):
-        """Simbol M/B/T hanya penanda spawn; setelah dibaca jadi lantai biasa."""
-        for y, row in enumerate(self.rows):
-            for x, c in enumerate(row):
-                if c in "MBT":
-                    row[x] = "."
-
-    def bisa_jalan(self, rect):
-        """True kalau rect tidak menyentuh tile solid mana pun."""
-        x0, x1 = rect.left // TILE, (rect.right - 1) // TILE
-        y0, y1 = rect.top // TILE, (rect.bottom - 1) // TILE
-        for ty in range(y0, y1 + 1):
-            for tx in range(x0, x1 + 1):
-                if self.is_solid(tx, ty):
-                    return False
-        return True
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-# ----------------------------------------------------------------------
-# 2. ENTITAS (pemain, monster, jebakan)
-# ----------------------------------------------------------------------
-class Entity:
-    def __init__(self, cx, cy, size, speed, hp):
-        self.size = size
-        self.x = cx - size / 2   # posisi float supaya gerak halus
-        self.y = cy - size / 2
-        self.speed = speed
-        self.hp = hp
+# DATA AREA MAP (koordinat piksel asli dungeon_map.png, 2208 x 1344)
+# Area lantai yang boleh dilewati (ruangan + lorong)
+WALKABLE_AREAS = [
+    pygame.Rect(95, 98, 435, 430),     # Ruang 1 (kiri atas)
+    pygame.Rect(520, 242, 205, 92),    # Lorong ruang 1 -> 2
+    pygame.Rect(718, 98, 532, 430),    # Ruang 2 (tengah atas)
+    pygame.Rect(960, 520, 100, 210),   # Lorong ruang 2 -> 3 (vertikal)
+    pygame.Rect(718, 720, 532, 432),   # Ruang 3 (tengah bawah)
+    pygame.Rect(1245, 912, 200, 96),   # Lorong ruang 3 -> 4
+    pygame.Rect(1440, 672, 628, 528),  # Ruang 4 (kanan bawah)
+]
 
-    @property
-    def rect(self):
-        return pygame.Rect(round(self.x), round(self.y), self.size, self.size)
-
-    @property
-    def center(self):
-        return (self.x + self.size / 2, self.y + self.size / 2)
-
-    def move(self, tilemap, dx, dy):
-        """Sumbu X dan Y dicek TERPISAH -> bisa meluncur di sepanjang dinding."""
-        self.x += dx
-        if not tilemap.bisa_jalan(self.rect):
-            self.x -= dx          # batalkan hanya gerak X
-        self.y += dy
-        if not tilemap.bisa_jalan(self.rect):
-            self.y -= dy          # batalkan hanya gerak Y
-
-
-class Player(Entity):
-    def __init__(self, cx, cy):
-        super().__init__(cx, cy, 20, 150, 5)
-        self.invuln = 0.0
-        self.attack_cd = 0.0
-        self.flash = 0.0
-
-    def teleport(self, cx, cy):
-        self.x, self.y = cx - self.size / 2, cy - self.size / 2
-
-
-class Monster(Entity):
-    def __init__(self, cx, cy, boss=False):
-        if boss:
-            super().__init__(cx, cy, 48, 70, 10)
-        else:
-            super().__init__(cx, cy, 22, 80, 3)
-        self.boss = boss
-        self.hit_cd = 0.0
-
-    def update(self, dt, player, tilemap):
-        px, py = player.center
-        mx, my = self.center
-        dist = math.hypot(px - mx, py - my)
-        if 0 < dist < 260:  # mengejar kalau pemain dekat
-            step = self.speed * dt
-            self.move(tilemap, (px - mx) / dist * step, (py - my) / dist * step)
-        self.hit_cd = max(0.0, self.hit_cd - dt)
+# Rintangan: tong, peti, rak, bangku, kuali, lubang, papan
+OBSTACLES = [
+    # Ruang 1
+    pygame.Rect(100, 470, 42, 56),
+    pygame.Rect(432, 462, 48, 64),
+    pygame.Rect(480, 48, 48, 94),
+    pygame.Rect(432, 150, 42, 40),
+    pygame.Rect(96, 95, 96, 40),
+    # Ruang 2
+    pygame.Rect(722, 470, 98, 56),
+    pygame.Rect(1200, 432, 48, 48),
+    pygame.Rect(1200, 48, 48, 94),
+    pygame.Rect(816, 262, 48, 26),
+    pygame.Rect(722, 95, 46, 40),
+    pygame.Rect(1152, 95, 48, 40),
+    # Ruang 3
+    pygame.Rect(720, 672, 48, 94),
+    pygame.Rect(780, 702, 48, 64),
+    pygame.Rect(1152, 715, 98, 48),
+    pygame.Rect(768, 1126, 96, 26),
+    pygame.Rect(1203, 1095, 44, 56),
+    pygame.Rect(815, 932, 50, 30),     # Lubang
+    # Ruang 4
+    pygame.Rect(1440, 625, 48, 94),
+    pygame.Rect(2016, 625, 48, 94),
+    pygame.Rect(1443, 1142, 44, 56),
+    pygame.Rect(1490, 1152, 46, 46),
+    pygame.Rect(1968, 1152, 48, 46),
+    pygame.Rect(2020, 1142, 44, 56),
+    pygame.Rect(1680, 932, 50, 30),    # Lubang
+]
 
 
-class Trap:
-    def __init__(self, tx, ty):
-        self.rect = pygame.Rect(tx * TILE + 4, ty * TILE + 4, TILE - 8, TILE - 8)
-        self.damage = 1
+# Posisi obor: (x kiri, y atas, arah ambil tembok polos untuk menutup obor lama)
+TORCHES = [
+    (204, 48, -48), (396, 48, -48),          # Ruang 1
+    (828, 48, -48), (1116, 48, -48),         # Ruang 2
+    (828, 672, 48), (1116, 672, 48),         # Ruang 3
+    (1548, 624, -48), (1692, 624, -48),      # Ruang 4
+    (1836, 624, -48), (1980, 624, -48),
+]
+TORCH_FRAME_W, TORCH_FRAME_H = 48, 66
+TORCH_FRAME_MS = 100   # lama tiap frame api (milidetik)
 
 
-# ----------------------------------------------------------------------
-# 3. PINTU + RUANGAN
-# ----------------------------------------------------------------------
+# DATA PINTU (di lorong menuju ruangan berikutnya)
+DOOR_DATA = [
+    # Ruang 1 -> 2
+    dict(file="Door_1.png", kind="single", crop=(0, 4, 19, 28), scale=3,
+         passage=pygame.Rect(520, 242, 205, 92), offset=(0, 0)),
+    # Ruang 2 -> 3
+    dict(file="DoubleDoor.png", kind="double", crop=(0, 4, 64, 28), scale=1.5,
+         passage=pygame.Rect(960, 520, 100, 210), offset=(0, 0)),
+    # Ruang 3 -> 4
+    dict(file="Door_2.png", kind="single", crop=(0, 4, 19, 28), scale=3,
+         passage=pygame.Rect(1245, 912, 200, 96), offset=(0, 0)),
+]
+
+DOOR_SPEED = 0.06        # kecepatan buka/tutup per frame (0..1)
+DOOR_BLOCK_UNTIL = 0.6   # pintu masih menghalangi selama progres < ini
+DOOR_OPEN_DIST = 40      # pintu mulai terbuka kalau pemain sedekat ini
+
+
+# DATA KAMERA PER RUANGAN
+# Area tampilan kamera tiap ruangan (termasuk tembok)
+ROOM_VIEWS = {
+    1: pygame.Rect(82, 38, 460, 548),
+    2: pygame.Rect(708, 38, 554, 548),
+    3: pygame.Rect(708, 660, 554, 552),
+    4: pygame.Rect(1426, 614, 652, 646),
+}
+
+# Zona untuk mendeteksi pemain sedang ada di ruangan mana
+# (lorong dibagi dua: separuh masuk ruangan kiri/atas, separuh ruangan kanan/bawah)
+ROOM_ZONES = [
+    (pygame.Rect(95, 98, 527, 430), 1),
+    (pygame.Rect(622, 98, 628, 430), 2),
+    (pygame.Rect(960, 528, 100, 97), 2),
+    (pygame.Rect(960, 625, 100, 95), 3),
+    (pygame.Rect(718, 720, 532, 432), 3),
+    (pygame.Rect(1245, 912, 100, 96), 3),
+    (pygame.Rect(1345, 912, 100, 96), 4),
+    (pygame.Rect(1440, 672, 628, 528), 4),
+]
+
+# CLASS DOOR
 class Door:
-    def __init__(self, tile, target_room, target_door):
-        self.tile = tile                  # posisi tile pintu di ruangan ini
-        self.target_room = target_room    # id ruangan tujuan
-        self.target_door = target_door    # id pintu di ruangan tujuan
 
+    def __init__(self, data):
+        img = pygame.image.load(os.path.join(BASE_DIR, data["file"])).convert_alpha()
+        img = img.subsurface(pygame.Rect(data["crop"])).copy()
+        w, h = img.get_size()
+        s = data["scale"]
+        self.image = pygame.transform.scale(img, (int(w * s), int(h * s)))
 
-class Room:
-    def __init__(self, room_id, name, rows, doors):
-        self.id = room_id
-        self.name = name
-        self.tilemap = Tilemap(rows)
-        self.doors = doors                # {"E": Door(...), ...}
-        # penanda spawn dibaca sekali, lalu peta dibersihkan
-        self._monster_spawns = self.tilemap.find("M")
-        self._boss_spawns = self.tilemap.find("B")
-        self._trap_spawns = self.tilemap.find("T")
-        self.tilemap.erase_marks()
-        # ---- status ruangan (bertahan selama game berjalan) ----
-        self.visited = False
-        self.cleared = False
-        self.monsters = []
-        self.traps = []
+        # Letakkan di tengah lorong
+        p = data["passage"]
+        iw, ih = self.image.get_size()
+        ox, oy = data["offset"]
+        self.rect = pygame.Rect(0, 0, iw, ih)
+        self.rect.center = (p.centerx + ox, p.centery + oy)
+
+        self.kind = data["kind"]
+        self.open = False
+        self.progress = 0.0   # 0 = tertutup, 1 = terbuka penuh
 
     @property
-    def is_boss_room(self):
-        return bool(self._boss_spawns)
+    def blocking(self):
+        return self.progress < DOOR_BLOCK_UNTIL
 
-    def door_at(self, tx, ty):
-        for d in self.doors.values():
-            if d.tile == (tx, ty):
-                return d
-        return None
+    def update(self, player_rect):
+        # Otomatis: terbuka saat pemain mendekat/melewati, menutup lagi
+        # setelah pemain menjauh (tidak menutup selagi pemain di bawahnya)
+        area = self.rect.inflate(DOOR_OPEN_DIST * 2, DOOR_OPEN_DIST * 2)
+        self.open = area.colliderect(player_rect)
+        target = 1.0 if self.open else 0.0
+        if self.progress < target:
+            self.progress = min(target, self.progress + DOOR_SPEED)
+        elif self.progress > target:
+            self.progress = max(target, self.progress - DOOR_SPEED)
 
-    def spawn_beside(self, door_id):
-        """Titik tengah tile lantai di samping pintu (sisi dalam ruangan)."""
-        dx, dy = self.doors[door_id].tile
-        for ox, oy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            tx, ty = dx + ox, dy + oy
-            if self.tilemap.tile_at(tx, ty) == ".":
-                return tx * TILE + TILE // 2, ty * TILE + TILE // 2
-        raise ValueError(f"Pintu {door_id} tidak punya lantai di sampingnya")
+    def draw(self, surface):
+        p = self.progress
+        if p >= 1.0:
+            return
+        w, h = self.rect.size
+        if self.kind == "double":
+            half = w // 2
+            shift = int(half * p)
+            kiri = self.image.subsurface((0, 0, half, h))
+            kanan = self.image.subsurface((half, 0, w - half, h))
+            surface.blit(kiri, (self.rect.x - shift, self.rect.y))
+            surface.blit(kanan, (self.rect.x + half + shift, self.rect.y))
+        else:
+            # Geser ke atas, dipotong di area pintu
+            shift = int(h * p)
+            clip_lama = surface.get_clip()
+            surface.set_clip(self.rect)
+            surface.blit(self.image, (self.rect.x, self.rect.y - shift))
+            surface.set_clip(clip_lama)
 
-    def enter(self):
-        """Dipanggil tiap pemain masuk. Isi ruangan hanya dibuat SEKALI."""
-        if not self.visited:
-            self.visited = True
-            for tx, ty in self._monster_spawns:
-                self.monsters.append(Monster(tx * TILE + 16, ty * TILE + 16))
-            for tx, ty in self._boss_spawns:
-                self.monsters.append(Monster(tx * TILE + 16, ty * TILE + 16, boss=True))
-            self.traps = [Trap(tx, ty) for tx, ty in self._trap_spawns]
-        self.refresh_cleared()
+# CLASS DUNGEON MAP
+class DungeonMap:
 
-    def refresh_cleared(self):
-        self.monsters = [m for m in self.monsters if m.hp > 0]
-        if not self.monsters:
-            self.cleared = True
+    def __init__(self, filename):
+        path = os.path.join(BASE_DIR, filename)
+        self.image = pygame.image.load(path).convert()
+        self.width, self.height = self.image.get_size()
 
+        # Animasi obor (kalau file sprite tidak ada, game tetap jalan tanpa animasi)
+        self.torch_frames = []
+        try:
+            sheet = pygame.image.load(
+                os.path.join(BASE_DIR, "torch_frames.png")).convert_alpha()
+            for i in range(sheet.get_width() // TORCH_FRAME_W):
+                self.torch_frames.append(
+                    sheet.subsurface((i * TORCH_FRAME_W, 0,
+                                      TORCH_FRAME_W, TORCH_FRAME_H)).copy())
+        except (pygame.error, FileNotFoundError):
+            print("torch_frames.png tidak ditemukan, obor tidak dianimasikan")
 
-# ----------------------------------------------------------------------
-# 4. DATA PETA (sesuai denah: A -> B -> C -> D(bos))
-# ----------------------------------------------------------------------
-ROOM_A = [  # ruang awal, kosong. Pintu E di (15,4)
-    "################",
-    "#..............#",
-    "#..............#",
-    "#..............#",
-    "#..............D",
-    "#..............#",
-    "#..............#",
-    "#..............#",
-    "################",
-]
+        if self.torch_frames:
+            self._hapus_obor_statis()
 
-ROOM_B = [  # pintu W (0,5) ke A, pintu S (10,10) ke C
-    "####################",
-    "#..................#",
-    "#..................#",
-    "#....M.............#",
-    "#..................#",
-    "D..................#",
-    "#..............M...#",
-    "#..................#",
-    "#........T.........#",
-    "#..................#",
-    "##########D#########",
-]
+        # Pintu antar ruangan (kalau sprite tidak ada, pintu itu dilewati)
+        self.doors = []
+        for data in DOOR_DATA:
+            try:
+                self.doors.append(Door(data))
+            except (pygame.error, FileNotFoundError):
+                print(data["file"] + " tidak ditemukan, pintu dilewati")
 
-ROOM_C = [  # pintu N (10,0) ke B, pintu E (19,5) ke bos
-    "##########D#########",
-    "#..................#",
-    "#..................#",
-    "#....T.............#",
-    "#..................#",
-    "#..................D",
-    "#..........M.......#",
-    "#..................#",
-    "#..M...............#",
-    "#..................#",
-    "####################",
-]
+    def _hapus_obor_statis(self):
+        # Tutup api obor bawaan gambar dengan menyalin potongan tembok polos
+        for x, y, dx in TORCHES:
+            area = pygame.Rect(x - 12, y - 15, TORCH_FRAME_W, 57)
+            tembok = self.image.subsurface(area.move(dx, 0)).copy()
+            self.image.blit(tembok, area.topleft)
 
-ROOM_D = [  # ruang bos: arena lebih luas, SATU pintu masuk W (0,7)
-    "############################",
-    "#..........................#",
-    "#.....................M....#",
-    "#.......T..................#",
-    "#..........................#",
-    "#..........................#",
-    "#..........................#",
-    "D..................B.......#",
-    "#..........................#",
-    "#..........................#",
-    "#..........................#",
-    "#.......T..................#",
-    "#.....................M....#",
-    "#..........................#",
-    "############################",
-]
+    def draw_torches(self, surface):
+        if not self.torch_frames:
+            return
+        tick = pygame.time.get_ticks() // TORCH_FRAME_MS
+        for i, (x, y, dx) in enumerate(TORCHES):
+            # +i*3 supaya api tiap obor tidak bergerak serempak
+            frame = self.torch_frames[(tick + i * 3) % len(self.torch_frames)]
+            surface.blit(frame, (x - 12, y - 15))
 
+    def update_doors(self, player_rect):
+        for door in self.doors:
+            door.update(player_rect)
 
-def build_rooms():
-    return {
-        "A": Room("A", "Perpustakaan", ROOM_A,
-                  {"E": Door((15, 4), "B", "W")}),
-        "B": Room("B", "Aula Utara", ROOM_B,
-                  {"W": Door((0, 5), "A", "E"),
-                   "S": Door((10, 10), "C", "N")}),
-        "C": Room("C", "Aula Selatan", ROOM_C,
-                  {"N": Door((10, 0), "B", "S"),
-                   "E": Door((19, 5), "D", "W")}),
-        "D": Room("D", "Ruang Bos", ROOM_D,
-                  {"W": Door((0, 7), "C", "E")}),
-    }
+    def draw_doors(self, surface):
+        for door in self.doors:
+            door.draw(surface)
 
+    def draw(self, surface):
+        surface.blit(self.image, (0, 0))
+        self.draw_torches(surface)
+        self.draw_doors(surface)
 
-# ----------------------------------------------------------------------
-# 5. DUNIA: pindah ruangan
-# ----------------------------------------------------------------------
-class World:
-    def __init__(self):
-        self.rooms = build_rooms()
-        self.current = self.rooms["A"]
-        self.current.enter()
-        cx, cy = self.current.spawn_beside("E")
-        self.player = Player(cx, cy)
+    def is_walkable_point(self, x, y):
+        for area in WALKABLE_AREAS:
+            if area.collidepoint(x, y):
+                return True
+        return False
 
-    def check_door(self):
-        """Kalau titik tengah pemain berada di tile pintu -> pindah ruangan."""
-        px, py = self.player.center
-        door = self.current.door_at(int(px // TILE), int(py // TILE))
-        if door is None:
+    def can_walk(self, rect):
+        # Semua sudut + titik tengah sisi harus ada di area lantai
+        points = [
+            rect.topleft, rect.topright,
+            rect.bottomleft, rect.bottomright,
+            rect.midtop, rect.midbottom,
+            rect.midleft, rect.midright,
+        ]
+        for x, y in points:
+            # -1 supaya sisi kanan/bawah rect tidak dianggap keluar area
+            px = min(x, rect.right - 1)
+            py = min(y, rect.bottom - 1)
+            if not self.is_walkable_point(px, py):
+                return False
+
+        # Tidak boleh menabrak rintangan
+        if rect.collidelist(OBSTACLES) != -1:
             return False
-        target = self.rooms[door.target_room]
-        # muncul di sisi dalam pintu pasangan (sisi berlawanan dari tempat keluar)
-        cx, cy = target.spawn_beside(door.target_door)
-        self.current = target
-        self.player.teleport(cx, cy)
-        self.current.enter()
+
+        # Pintu tertutup menghalangi
+        for door in self.doors:
+            if door.blocking and rect.colliderect(door.rect):
+                return False
+
         return True
 
-    def update(self, dt, keys):
-        p, room = self.player, self.current
-        # input
-        dx = (keys[pygame.K_d] or keys[pygame.K_RIGHT]) - (keys[pygame.K_a] or keys[pygame.K_LEFT])
-        dy = (keys[pygame.K_s] or keys[pygame.K_DOWN]) - (keys[pygame.K_w] or keys[pygame.K_UP])
-        if dx and dy:
-            dx *= 0.7071
-            dy *= 0.7071
-        p.move(room.tilemap, dx * p.speed * dt, dy * p.speed * dt)
-
-        # timer
-        p.invuln = max(0.0, p.invuln - dt)
-        p.attack_cd = max(0.0, p.attack_cd - dt)
-        p.flash = max(0.0, p.flash - dt)
-
-        # serang
-        if keys[pygame.K_SPACE] and p.attack_cd == 0:
-            p.attack_cd = 0.35
-            p.flash = 0.1
-            pcx, pcy = p.center
-            for m in room.monsters:
-                mx, my = m.center
-                if math.hypot(mx - pcx, my - pcy) < 52 + m.size / 2:
-                    m.hp -= 1
-
-        # monster
-        for m in room.monsters:
-            m.update(dt, p, room.tilemap)
-            if m.rect.colliderect(p.rect) and p.invuln == 0:
-                p.hp -= 1
-                p.invuln = 1.0
-        # jebakan
-        for t in room.traps:
-            if t.rect.colliderect(p.rect) and p.invuln == 0:
-                p.hp -= t.damage
-                p.invuln = 1.0
-
-        room.refresh_cleared()
-        self.check_door()
+    def draw_debug(self, surface):
+        for area in WALKABLE_AREAS:
+            pygame.draw.rect(surface, (0, 255, 0), area, 2)
+        for obs in OBSTACLES:
+            pygame.draw.rect(surface, (255, 0, 0), obs, 2)
+        for door in self.doors:
+            pygame.draw.rect(surface, (255, 255, 0), door.rect, 2)
 
 
-# ----------------------------------------------------------------------
-# 6. TAMPILAN + LOOP
-# ----------------------------------------------------------------------
+# CLASS PLAYER
+class Player:
+
+    def __init__(self, x, y):
+        self.rect = pygame.Rect(x, y, 28, 28)
+        self.speed = 4
+        self.color = (50, 120, 255)
+
+    def move(self, keys, dungeon):
+        dx = 0
+        dy = 0
+
+        if keys[K_LEFT] or keys[K_a]:
+            dx = -self.speed
+        if keys[K_RIGHT] or keys[K_d]:
+            dx = self.speed
+        if keys[K_UP] or keys[K_w]:
+            dy = -self.speed
+        if keys[K_DOWN] or keys[K_s]:
+            dy = self.speed
+
+        # Collision sumbu X
+        self.rect.x += dx
+        if not dungeon.can_walk(self.rect):
+            self.rect.x -= dx
+
+        # Collision sumbu Y
+        self.rect.y += dy
+        if not dungeon.can_walk(self.rect):
+            self.rect.y -= dy
+
+    def draw(self, surface):
+        pygame.draw.rect(surface, self.color, self.rect)
+
+
+# CLASS CAMERA
+class Camera:
+
+    def __init__(self, map_w, map_h, start_room):
+        self.map_rect = pygame.Rect(0, 0, map_w, map_h)
+        r = ROOM_VIEWS[start_room]
+        self.view = [float(r.x), float(r.y), float(r.w), float(r.h)]
+
+    def target(self, room_id, player_rect):
+        # Tampilan ruangan, diperlebar kalau pemain keluar (misal di lorong)
+        t = ROOM_VIEWS[room_id].union(player_rect.inflate(40, 40))
+        return t.clip(self.map_rect)
+
+    def update(self, room_id, player_rect, snap=False):
+        t = self.target(room_id, player_rect)
+        for i, v in enumerate((t.x, t.y, t.w, t.h)):
+            if snap:
+                self.view[i] = v
+            else:
+                self.view[i] += (v - self.view[i]) * 0.12   # perpindahan halus
+                if abs(v - self.view[i]) < 0.5:
+                    self.view[i] = v
+
+    def get_rect(self):
+        x, y, w, h = self.view
+        r = pygame.Rect(round(x), round(y), max(1, round(w)), max(1, round(h)))
+        return r.clip(self.map_rect)
+
+# CLASS GAME
+
 class Game:
-    HUD = 40
 
     def __init__(self):
-        pygame.init()
-        self.font = pygame.font.SysFont("consolas,monospace", 18)
-        self.clock = pygame.time.Clock()
-        self.world = World()
-        self.screen = None
-        self.shown_room = None
+        self.dungeon = DungeonMap("dungeon_map.png")
+        self.player = Player(200, 250)
+        self.running = True
+        self.debug = False
 
-    def fit_window(self):
-        tm = self.world.current.tilemap
-        self.screen = pygame.display.set_mode((tm.w * TILE, tm.h * TILE + self.HUD))
-        pygame.display.set_caption("Dungeon")
-        self.shown_room = self.world.current
+        # Surface "dunia" seukuran map asli
+        self.world = pygame.Surface((self.dungeon.width, self.dungeon.height))
+        self.full_rect = pygame.Rect(0, 0, self.dungeon.width, self.dungeon.height)
 
-    def draw(self):
-        w = self.world
-        room, tm = w.current, w.current.tilemap
-        if self.shown_room is not room:
-            self.fit_window()
-        s = self.screen
-        s.fill((8, 8, 14))
-        for ty in range(tm.h):
-            for tx in range(tm.w):
-                c = tm.tile_at(tx, ty)
-                r = pygame.Rect(tx * TILE, ty * TILE, TILE, TILE)
-                if c == "#":
-                    pygame.draw.rect(s, (60, 62, 90), r)
-                    pygame.draw.rect(s, (40, 42, 66), r, 1)
-                elif c == "D":
-                    pygame.draw.rect(s, (200, 160, 60), r)
-                else:
-                    pygame.draw.rect(s, (88, 92, 112), r)
-                    pygame.draw.rect(s, (78, 82, 102), r, 1)
-        for t in room.traps:
-            pygame.draw.polygon(s, (220, 220, 230), [
-                (t.rect.left, t.rect.bottom), (t.rect.centerx, t.rect.top),
-                (t.rect.right, t.rect.bottom)])
-        for m in room.monsters:
-            col = (140, 20, 60) if m.boss else (200, 60, 50)
-            pygame.draw.rect(s, col, m.rect)
-            bar = pygame.Rect(m.rect.left, m.rect.top - 6, m.size * m.hp / (10 if m.boss else 3), 4)
-            pygame.draw.rect(s, (80, 220, 90), bar)
-        p = w.player
-        blink = p.invuln > 0 and int(p.invuln * 10) % 2 == 0
-        if not blink:
-            pygame.draw.rect(s, (90, 170, 255), p.rect)
-        if p.flash > 0:
-            pygame.draw.circle(s, (255, 255, 255), (int(p.center[0]), int(p.center[1])), 52, 2)
+        # Kamera per ruangan (tekan M untuk melihat seluruh map)
+        self.mode_ruangan = True
+        self.ruangan = self.cari_ruangan()
+        self.camera = Camera(self.dungeon.width, self.dungeon.height, self.ruangan)
+        self.camera.update(self.ruangan, self.player.rect, snap=True)
 
-        status = "BERSIH" if room.cleared else "ADA MUSUH"
-        txt = f"{room.name} [{status}]   HP: {p.hp}"
-        s.blit(self.font.render(txt, True, (240, 240, 240)), (8, tm.h * TILE + 10))
-        if p.hp <= 0:
-            msg = self.font.render("GAME OVER - tekan R", True, (255, 90, 90))
-            s.blit(msg, msg.get_rect(center=(tm.w * TILE // 2, tm.h * TILE // 2)))
-        pygame.display.flip()
+    def cari_ruangan(self):
+        cx, cy = self.player.rect.center
+        for rect, room_id in ROOM_ZONES:
+            if rect.collidepoint(cx, cy):
+                return room_id
+        return getattr(self, "ruangan", 1)
 
     def run(self):
-        self.fit_window()
-        while True:
-            dt = min(self.clock.tick(60) / 1000, 0.05)
-            for e in pygame.event.get():
-                if e.type == pygame.QUIT:
-                    pygame.quit()
-                    sys.exit()
-                if e.type == pygame.KEYDOWN and e.key == pygame.K_r and self.world.player.hp <= 0:
-                    self.world = World()
-            if self.world.player.hp > 0:
-                self.world.update(dt, pygame.key.get_pressed())
-            self.draw()
+        while self.running:
+            clock.tick(FPS)
+
+            for event in pygame.event.get():
+                if event.type == QUIT:
+                    print("Keluar: jendela ditutup (event QUIT)")
+                    self.running = False
+                if event.type == KEYDOWN:
+                    if event.key == K_ESCAPE:
+                        print("Keluar: tombol ESC ditekan")
+                        self.running = False
+                    if event.key == K_F1:
+                        self.debug = not self.debug
+                    if event.key == K_m:
+                        self.mode_ruangan = not self.mode_ruangan
+
+            keys = pygame.key.get_pressed()
+            self.player.move(keys, self.dungeon)
+            self.dungeon.update_doors(self.player.rect)
+
+            # Gambar ke dunia (pintu digambar di dalam dungeon.draw)
+            self.dungeon.draw(self.world)
+            self.player.draw(self.world)
+            if self.debug:
+                self.dungeon.draw_debug(self.world)
+
+            # Tentukan bagian dunia yang ditampilkan
+            if self.mode_ruangan:
+                self.ruangan = self.cari_ruangan()
+                self.camera.update(self.ruangan, self.player.rect)
+                view = self.camera.get_rect()
+            else:
+                view = self.full_rect
+
+            # Ruangan di-scale memenuhi layar (rasio dijaga), sisanya hitam
+            bagian = self.world.subsurface(view)
+            scale = min(S_WIDTH / view.w, S_HEIGHT / view.h)
+            size = (int(view.w * scale), int(view.h * scale))
+            scaled = pygame.transform.scale(bagian, size)
+
+            screen.fill((0, 0, 0))
+            screen.blit(scaled, ((S_WIDTH - size[0]) // 2,
+                                 (S_HEIGHT - size[1]) // 2))
+
+            pygame.display.flip()
+
+        pygame.quit()
+        sys.exit()
 
 
 if __name__ == "__main__":
-    Game().run()
+    import traceback
+    try:
+        game = Game()
+        game.run()
+    except SystemExit:
+        pass
+    except Exception:
+        pesan = traceback.format_exc()
+        print(pesan)
+        with open(os.path.join(BASE_DIR, "error.txt"), "w") as f:
+            f.write(pesan)
+        pygame.quit()
+        input("Terjadi error (tersimpan di error.txt). Tekan Enter untuk menutup...")
